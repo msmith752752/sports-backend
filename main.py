@@ -1,10 +1,14 @@
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
 import requests
 import httpx
 import asyncio
+import os
 from collections import defaultdict
 from datetime import datetime, timezone
+
+load_dotenv()
 
 app = FastAPI()
 
@@ -31,10 +35,9 @@ SCOREBOARD_URL = "https://cdn.nba.com/static/json/liveData/scoreboard/todaysScor
 PBP_URL        = "https://cdn.nba.com/static/json/liveData/playbyplay/playbyplay_{game_id}.json"
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ─── CONFIG ──────────────────────────────────────────────────────────────────
-# Drop your keys here before tip-off
-YOUTUBE_API_KEY      = "AIzaSyAF-XtYeVTXw1lDTPzyRxElyNdMqABmrfM"
-YOUTUBE_LIVE_CHAT_ID = "Cg0KCzlQM3NEOUwzVUdzKicKGFVDQ1l0OTI3QlB6THJleEhDN0YtcktDZxILOVAzc0Q5TDNVR3M"
+# ─── CONFIG — loaded from .env file, never hardcoded ─────────────────────────
+YOUTUBE_API_KEY      = os.getenv("YOUTUBE_API_KEY")
+YOUTUBE_LIVE_CHAT_ID = os.getenv("YOUTUBE_LIVE_CHAT_ID")
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─── VOTE STATE ──────────────────────────────────────────────────────────────
