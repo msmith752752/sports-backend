@@ -72,11 +72,11 @@ def get_game_feed():
     if not games:
         return {"status": "no_games"}
 
-    # Target Thunder vs Spurs specifically
+    # Target Knicks vs Cavaliers specifically
     game = None
     for g in games:
         teams = [g["homeTeam"]["teamName"], g["awayTeam"]["teamName"]]
-        if "Thunder" in teams or "Spurs" in teams:
+        if "Knicks" in teams or "Cavaliers" in teams:
             game = g
             break
     if game is None:
@@ -203,8 +203,8 @@ async def poll_youtube_chat():
     global last_chat_token, chat_poll_active
 
     known_players = [
-        "Gilgeous-Alexander", "Holmgren", "Williams", "Wallace", "Dort",
-        "Wembanyama", "Johnson", "Castle", "Jones", "Vassell"
+        "Brunson", "Towns", "Anunoby", "Bridges", "Hart", "DiVincenzo",
+        "Mitchell", "Mobley", "Garland", "Allen", "Strus", "Hunter"
     ]
 
     async with httpx.AsyncClient() as client:
@@ -259,3 +259,129 @@ async def poll_youtube_chat():
             except Exception as e:
                 print(f"Chat poll error: {e}")
                 await asyncio.sleep(15)
+
+
+# ─── DRAFTKINGS ODDS (proxied through local backend) ─────────────────────────
+# Your local machine isn't blocked by DK — only cloud servers are
+DK_ENDPOINTS = [
+    "https://sportsbook-nash.draftkings.com/api/sportscontent/dkusnj/v1/leagues/42648?format=json",
+    "https://sportsbook-nash.draftkings.com/api/sportscontent/dkusma/v1/leagues/42648?format=json",
+    "https://sportsbook-nash.draftkings.com/api/sportscontent/dkusco/v1/leagues/42648?format=json",
+    "https://sportsbook-nash.draftkings.com/api/sportscontent/dkuspa/v1/leagues/42648?format=json",
+]
+
+DK_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Origin": "https://sportsbook.draftkings.com",
+    "Referer": "https://sportsbook.draftkings.com/leagues/basketball/nba",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-site",
+    "Connection": "keep-alive",
+}
+
+def parse_dk_odds(data):
+    """Parse DraftKings JSON to extract NYK vs CLE spread/ML/total."""
+    nyk_spread = nyk_ml = cle_spread = cle_ml = ou_total = None
+
+    # DK structure: eventGroup -> offerCategories -> offers -> outcomes
+    categories = data.get("eventGroup", {}).get("offerCategories", [])
+    for cat in categories:
+        for subcat in cat.get("offerSubcategoryDescriptors", []):
+            offers = subcat.get("offerSubcategory", {}).get("offers", [])
+            for offer_group in offers:
+                for offer in (offer_group if isinstance(offer_group, list) else [offer_group]):
+                    label = (offer.get("label") or "").lower()
+                    outcomes = offer.get("outcomes", [])
+
+                    # Find NYK vs CLE game
+                    teams_in_offer = " ".join(o.get("label","") for o in outcomes).lower()
+                    if "knick" not in teams_in_offer and "cavalier" not in teams_in_offer:
+                        continue
+
+                    for o in outcomes:
+                        ol = (o.get("label") or "").lower()
+                        line = o.get("line")
+                        odds = o.get("oddsAmerican")
+
+                        if "knick" in ol:
+                            if "spread" in label and line is not None: nyk_spread = line
+                            if "moneyline" in label and odds is not None: nyk_ml = odds
+                        if "cavalier" in ol or "cavs" in ol:
+                            if "spread" in label and line is not None: cle_spread = line
+                            if "moneyline" in label and odds is not None: cle_ml = odds
+                        if "over" in ol and "total" in label and line is not None:
+                            ou_total = line
+
+    return nyk_spread, cle_spread, nyk_ml, cle_ml, ou_total
+
+
+@app.get("/odds")
+def get_odds():
+    # Try DraftKings first
+    for url in DK_ENDPOINTS:
+        try:
+            r = requests.get(url, headers=DK_HEADERS, timeout=10)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            nyk_spread, cle_spread, nyk_ml, cle_ml, ou_total = parse_dk_odds(data)
+            if nyk_spread is not None:
+                return {
+                    "status": "ok",
+                    "source": "draftkings",
+                    "nyk": {"spread": nyk_spread, "ml": nyk_ml},
+                    "cle": {"spread": cle_spread, "ml": cle_ml},
+                    "total": ou_total,
+                }
+        except Exception as e:
+            print(f"DK odds error ({url[-30:]}): {e}")
+            continue
+
+    # Try ESPN public odds API (no key needed)
+    try:
+        espn_url = "https://sports.core.api.espn.com/v2/sports/basketball/leagues/nba/events?limit=20"
+        espn_headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+        r = requests.get(espn_url, headers=espn_headers, timeout=8)
+        if r.status_code == 200:
+            events = r.json().get("items", [])
+            for ev_ref in events:
+                ev_url = ev_ref.get("$ref", "")
+                ev_r = requests.get(ev_url, headers=espn_headers, timeout=6)
+                if ev_r.status_code != 200:
+                    continue
+                ev = ev_r.json()
+                name = ev.get("name", "")
+                if "Knick" not in name and "Cavalier" not in name:
+                    continue
+                # Found the game — get odds
+                comps = ev.get("competitions", [{}])
+                for comp in comps:
+                    odds_list = comp.get("odds", [])
+                    for odd in odds_list:
+                        nyk_spread = odd.get("awayTeamOdds", {}).get("spreadOdds")
+                        cle_spread = odd.get("homeTeamOdds", {}).get("spreadOdds")
+                        nyk_ml = odd.get("awayTeamOdds", {}).get("moneyLine")
+                        cle_ml = odd.get("homeTeamOdds", {}).get("moneyLine")
+                        ou_total = odd.get("overUnder")
+                        if nyk_spread is not None:
+                            return {
+                                "status": "ok",
+                                "source": "espn",
+                                "nyk": {"spread": nyk_spread, "ml": nyk_ml},
+                                "cle": {"spread": cle_spread, "ml": cle_ml},
+                                "total": ou_total,
+                            }
+    except Exception as e:
+        print(f"ESPN odds error: {e}")
+
+    # Final fallback — tonight's opening lines (update each game)
+    return {
+        "status": "fallback",
+        "nyk": {"spread": 2.5,  "ml": 110},
+        "cle": {"spread": -2.5, "ml": -130},
+        "total": 214.5,
+    }
